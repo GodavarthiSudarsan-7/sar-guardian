@@ -1,7 +1,7 @@
 import React from 'react';
-import { useApp } from '@/context/AppContext';
+import { useApp } from '@/context/useApp';
 import { Transaction, AMLRule, RiskLevel } from '@/types';
-import { SectionHeader, RiskBadge, KVRow } from '@/components/shared/UIComponents';
+import { SectionHeader, RiskBadge, KVRow, KycStatus } from '@/components/shared/UIComponents';
 import { AlertTriangle, ArrowLeft, FileText, Building2, Globe, ArrowDownLeft, ArrowUpRight, Banknote } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -188,7 +188,7 @@ const CaseView: React.FC = () => {
           <div className="panel">
             <SectionHeader title="KYC Profile" subtitle="Customer due diligence" />
             <div className="p-4">
-              <KVRow label="KYC Status" value={<span className="text-warning font-mono">EDD Active</span>} />
+              <KVRow label="KYC Status" value={<KycStatus status={alert.customer.kycStatus} />} />
               <KVRow label="Onboarded" value={alert.customer.onboardedDate} mono />
               <KVRow label="Nationality" value={alert.customer.nationality} />
               <KVRow label="Occupation" value={alert.customer.occupation} />

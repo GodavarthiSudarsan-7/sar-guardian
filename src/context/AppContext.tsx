@@ -1,20 +1,16 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
-import { AppState, Role, AuditEntry, SARDraft, SARVersion, Alert } from '@/types';
-import { mockAlerts, mockAuditLog, generateSARNarrative, initialSARDraft } from '@/data/mockData';
+import React, { useCallback, useState } from 'react';
+import { AppState, Role, AuditEntry, SARDraft, SARVersion } from '@/types';
+import { mockAlerts, mockAuditLog, generateSARNarrative, createSARDraft } from '@/data/mockData';
+import { AppContext } from './app-context';
 
-interface AppContextType extends AppState {
-  setRole: (role: Role) => void;
-  selectAlert: (alertId: string | null) => void;
-  setView: (view: AppState['view']) => void;
-  addAuditEntry: (entry: Omit<AuditEntry, 'id' | 'timestamp'>) => void;
-  generateSAR: (alertId: string) => void;
-  updateSARContent: (content: string) => void;
-  approveSAR: (comments: string) => void;
-  rejectSAR: (reason: string) => void;
-  setAnalystComments: (comments: string) => void;
-}
+const AI_ACTOR = 'SAR Generator AI v2.1';
 
-const AppContext = createContext<AppContextType | null>(null);
+/**
+ * Audit IDs are sequential and derived from the log itself. The log is
+ * append-only, so this cannot collide — unlike `AUD-${Date.now()}`, which
+ * produced duplicate React keys for entries written in the same millisecond.
+ */
+const nextAuditId = (log: AuditEntry[]): string => `AUD-${String(log.length + 1).padStart(3, '0')}`;
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [state, setState] = useState<AppState>({
@@ -26,156 +22,187 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     view: 'dashboard',
   });
 
-  const setRole = useCallback((role: Role) => {
-    setState(prev => ({ ...prev, role }));
-    addAuditEntry({
-      action: `Role Switched: ${role.toUpperCase()}`,
-      actor: 'System',
-      role,
-      category: 'user_action',
-      details: `User switched to ${role} role view.`,
+  // Declared before every caller. It previously sat below `setRole`, which
+  // referenced it from its own closure before initialisation.
+  const addAuditEntry = useCallback((entry: Omit<AuditEntry, 'id' | 'timestamp'>) => {
+    const timestamp = new Date().toISOString();
+    setState(prev => {
+      const newEntry: AuditEntry = { ...entry, id: nextAuditId(prev.auditLog), timestamp };
+      return { ...prev, auditLog: [newEntry, ...prev.auditLog] };
     });
   }, []);
 
+  const setRole = useCallback(
+    (role: Role) => {
+      setState(prev => ({ ...prev, role }));
+      addAuditEntry({
+        action: `Role Switched: ${role.toUpperCase()}`,
+        actor: 'System',
+        role,
+        category: 'user_action',
+        details: `User switched to ${role} role view.`,
+      });
+    },
+    [addAuditEntry],
+  );
+
   const selectAlert = useCallback((alertId: string | null) => {
-    setState(prev => ({ ...prev, selectedAlertId: alertId, view: alertId ? 'case' : 'dashboard', sarDraft: null }));
+    setState(prev => ({
+      ...prev,
+      selectedAlertId: alertId,
+      view: alertId ? 'case' : 'dashboard',
+      sarDraft: null,
+    }));
   }, []);
 
   const setView = useCallback((view: AppState['view']) => {
     setState(prev => ({ ...prev, view }));
   }, []);
 
-  const addAuditEntry = useCallback((entry: Omit<AuditEntry, 'id' | 'timestamp'>) => {
-    const newEntry: AuditEntry = {
-      ...entry,
-      id: `AUD-${Date.now()}`,
-      timestamp: new Date().toISOString(),
-    };
-    setState(prev => ({ ...prev, auditLog: [newEntry, ...prev.auditLog] }));
-  }, []);
+  const generateSAR = useCallback(
+    (alertId: string) => {
+      const content = generateSARNarrative(alertId);
+      const version: SARVersion = {
+        version: 1,
+        timestamp: new Date().toISOString(),
+        author: AI_ACTOR,
+        content,
+        changes: 'Initial AI-generated draft',
+      };
+      const draft: SARDraft = {
+        ...createSARDraft(alertId),
+        currentVersion: 1,
+        versions: [version],
+      };
+      setState(prev => ({ ...prev, sarDraft: draft, view: 'sar' }));
 
-  const generateSAR = useCallback((alertId: string) => {
-    const content = generateSARNarrative(alertId);
-    const version: SARVersion = {
-      version: 1,
-      timestamp: new Date().toISOString(),
-      author: 'SAR Generator AI v2.1',
-      content,
-      changes: 'Initial AI-generated draft',
-    };
-    const draft: SARDraft = {
-      ...initialSARDraft,
-      alertId,
-      status: 'draft',
-      currentVersion: 1,
-      versions: [version],
-    };
-    setState(prev => ({ ...prev, sarDraft: draft, view: 'sar' }));
-
-    // Log audit entries
-    setTimeout(() => {
+      // Written synchronously and in order. These were previously staged on
+      // setTimeout, which left timers running after unmount.
       addAuditEntry({
         action: 'AI Prompt Dispatched',
-        actor: 'SAR Generator AI v2.1',
+        actor: AI_ACTOR,
         role: 'analyst',
         category: 'ai_prompt',
-        details: `Prompt: "Generate a SAR narrative for case ${alertId} based on structuring typology, sub-threshold deposits, rapid wire transfers, and PEP indicators. Use NCA/FCA SAR format."`,
+        details: `Prompt: "Generate a SAR narrative for case ${alertId} based on the triggered typologies and flagged transactions. Use NCA/FCA SAR format."`,
         metadata: { promptTokens: '847', model: 'compliance-llm-v2.1', templateUsed: 'TMPL-SAR-STR-002' },
       });
-    }, 100);
-    setTimeout(() => {
       addAuditEntry({
         action: 'Template Retrieved: TMPL-SAR-STR-002',
-        actor: 'SAR Generator AI v2.1',
+        actor: AI_ACTOR,
         role: 'analyst',
         category: 'template_retrieval',
         details: 'UK FCA SAR Structuring Template v4.1 retrieved and applied.',
         metadata: { templateId: 'TMPL-SAR-STR-002', version: '4.1', jurisdiction: 'UK' },
       });
-    }, 200);
-    setTimeout(() => {
       addAuditEntry({
-        action: 'SAR Draft Generated (v1)',
-        actor: 'SAR Generator AI v2.1',
+        action: `SAR Draft Generated (${draft.id} v1)`,
+        actor: AI_ACTOR,
         role: 'analyst',
         category: 'system',
         details: 'Initial SAR draft generated. Compliance checks: PASSED.',
-        metadata: { draftVersion: '1', wordCount: String(content.split(' ').length), complianceScore: '0.87' },
+        metadata: {
+          sarReference: draft.id,
+          draftVersion: '1',
+          wordCount: String(content.split(/\s+/).filter(Boolean).length),
+          complianceScore: '0.87',
+        },
       });
-    }, 300);
-  }, [addAuditEntry]);
+    },
+    [addAuditEntry],
+  );
 
   const updateSARContent = useCallback((content: string) => {
+    const timestamp = new Date().toISOString();
+
+    // The new version and its audit entry are produced by a single updater, so
+    // the logged version number always matches the one actually written. Reading
+    // the version from a separate copy of state logged a stale number; writing
+    // the audit entry outside the updater skipped it entirely, because the
+    // updater has not run yet when setState returns.
     setState(prev => {
       if (!prev.sarDraft) return prev;
+
       const newVersion: SARVersion = {
         version: prev.sarDraft.currentVersion + 1,
-        timestamp: new Date().toISOString(),
+        timestamp,
         author: prev.role === 'analyst' ? 'Analyst' : 'Auditor',
         content,
         changes: 'Manual edit by analyst',
       };
-      const updatedDraft: SARDraft = {
-        ...prev.sarDraft,
-        currentVersion: newVersion.version,
-        versions: [...prev.sarDraft.versions, newVersion],
-      };
-      return { ...prev, sarDraft: updatedDraft };
-    });
-    addAuditEntry({
-      action: `SAR Draft Edited (v${state.sarDraft ? state.sarDraft.currentVersion + 1 : 2})`,
-      actor: 'Analyst',
-      role: state.role,
-      category: 'user_action',
-      details: 'Analyst modified SAR narrative content.',
-    });
-  }, [addAuditEntry, state.role, state.sarDraft]);
 
-  const approveSAR = useCallback((comments: string) => {
-    setState(prev => {
-      if (!prev.sarDraft) return prev;
+      const auditEntry: AuditEntry = {
+        id: nextAuditId(prev.auditLog),
+        timestamp,
+        action: `SAR Draft Edited (v${newVersion.version})`,
+        actor: newVersion.author,
+        role: prev.role,
+        category: 'user_action',
+        details: 'Analyst modified SAR narrative content.',
+      };
+
       return {
         ...prev,
         sarDraft: {
           ...prev.sarDraft,
-          status: 'approved',
-          approvedBy: 'Sarah Chen',
-          approvedAt: new Date().toISOString(),
-          analystComments: comments,
+          currentVersion: newVersion.version,
+          versions: [...prev.sarDraft.versions, newVersion],
         },
+        auditLog: [auditEntry, ...prev.auditLog],
       };
     });
-    addAuditEntry({
-      action: 'SAR Approved',
-      actor: 'Sarah Chen',
-      role: 'analyst',
-      category: 'user_action',
-      details: `SAR draft approved and submitted. Analyst comments: "${comments || 'No additional comments.'}"`,
-    });
-  }, [addAuditEntry]);
+  }, []);
 
-  const rejectSAR = useCallback((reason: string) => {
-    setState(prev => {
-      if (!prev.sarDraft) return prev;
-      return {
-        ...prev,
-        sarDraft: {
-          ...prev.sarDraft,
-          status: 'rejected',
-          rejectedBy: 'Sarah Chen',
-          rejectedAt: new Date().toISOString(),
-          rejectionReason: reason,
-        },
-      };
-    });
-    addAuditEntry({
-      action: 'SAR Rejected',
-      actor: 'Sarah Chen',
-      role: 'analyst',
-      category: 'user_action',
-      details: `SAR draft rejected. Reason: "${reason}"`,
-    });
-  }, [addAuditEntry]);
+  const approveSAR = useCallback(
+    (comments: string) => {
+      setState(prev => {
+        if (!prev.sarDraft) return prev;
+        return {
+          ...prev,
+          sarDraft: {
+            ...prev.sarDraft,
+            status: 'approved',
+            approvedBy: 'Sarah Chen',
+            approvedAt: new Date().toISOString(),
+            analystComments: comments,
+          },
+        };
+      });
+      addAuditEntry({
+        action: 'SAR Approved',
+        actor: 'Sarah Chen',
+        role: 'analyst',
+        category: 'user_action',
+        details: `SAR draft approved and submitted. Analyst comments: "${comments || 'No additional comments.'}"`,
+      });
+    },
+    [addAuditEntry],
+  );
+
+  const rejectSAR = useCallback(
+    (reason: string) => {
+      setState(prev => {
+        if (!prev.sarDraft) return prev;
+        return {
+          ...prev,
+          sarDraft: {
+            ...prev.sarDraft,
+            status: 'rejected',
+            rejectedBy: 'Sarah Chen',
+            rejectedAt: new Date().toISOString(),
+            rejectionReason: reason,
+          },
+        };
+      });
+      addAuditEntry({
+        action: 'SAR Rejected',
+        actor: 'Sarah Chen',
+        role: 'analyst',
+        category: 'user_action',
+        details: `SAR draft rejected. Reason: "${reason}"`,
+      });
+    },
+    [addAuditEntry],
+  );
 
   const setAnalystComments = useCallback((comments: string) => {
     setState(prev => {
@@ -185,25 +212,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   return (
-    <AppContext.Provider value={{
-      ...state,
-      setRole,
-      selectAlert,
-      setView,
-      addAuditEntry,
-      generateSAR,
-      updateSARContent,
-      approveSAR,
-      rejectSAR,
-      setAnalystComments,
-    }}>
+    <AppContext.Provider
+      value={{
+        ...state,
+        setRole,
+        selectAlert,
+        setView,
+        addAuditEntry,
+        generateSAR,
+        updateSARContent,
+        approveSAR,
+        rejectSAR,
+        setAnalystComments,
+      }}
+    >
       {children}
     </AppContext.Provider>
   );
-};
-
-export const useApp = () => {
-  const ctx = useContext(AppContext);
-  if (!ctx) throw new Error('useApp must be used within AppProvider');
-  return ctx;
 };

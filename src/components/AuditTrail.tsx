@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useApp } from '@/context/AppContext';
+import { useApp } from '@/context/useApp';
 import { SectionHeader } from '@/components/shared/UIComponents';
 import { AuditEntry } from '@/types';
 import { Clock, Zap, FileText, User, Settings, ChevronDown, ChevronUp } from 'lucide-react';
@@ -101,7 +101,7 @@ const AuditEntryRow: React.FC<{ entry: AuditEntry }> = ({ entry }) => {
 type FilterCategory = 'all' | AuditEntry['category'];
 
 const AuditTrail: React.FC = () => {
-  const { auditLog, role } = useApp();
+  const { auditLog } = useApp();
   const [filter, setFilter] = useState<FilterCategory>('all');
 
   const filters: { key: FilterCategory; label: string }[] = [

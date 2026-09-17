@@ -1,4 +1,4 @@
-import { Alert, AuditEntry, SARDraft } from '@/types';
+import { Alert, AMLRule, AuditEntry, Customer, SARDraft, Typology } from '@/types';
 
 export const mockAlerts: Alert[] = [
   {
@@ -343,82 +343,223 @@ export const mockAuditLog: AuditEntry[] = [
   },
 ];
 
+const kycStatusLabels: Record<Customer['kycStatus'], string> = {
+  verified: 'Verified — Standard Due Diligence',
+  enhanced_due_diligence: 'Enhanced Due Diligence (EDD) — Active',
+  pending: 'Pending — Verification Incomplete',
+  failed: 'Failed — Verification Unsuccessful',
+};
+
+const typologyNarrativeLabels: Record<Typology, string> = {
+  structuring: 'currency structuring',
+  layering: 'layering',
+  rapid_fund_movement: 'rapid fund movement',
+  smurfing: 'smurfing',
+  trade_based_ml: 'trade-based money laundering',
+  shell_company: 'shell company activity',
+};
+
+const RULE = '━'.repeat(52);
+
+const gbp = (amount: number): string => `£${amount.toLocaleString('en-GB')}`;
+
+const longDate = (value: string | Date): string =>
+  new Date(value).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+
+const joinList = (items: string[]): string => {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+};
+
+/**
+ * Derives the SAR reference from the alert's case number so each case gets a
+ * distinct filing reference (CASE-2024-00341 -> SAR-2024-00341-GB).
+ */
+export const sarReferenceFor = (alert: Alert): string =>
+  `SAR-${alert.caseId.replace(/^CASE-/, '')}-GB`;
+
+const reportingPeriod = (alert: Alert): string => {
+  const dates = alert.transactions.map(t => t.date).sort();
+  if (dates.length === 0) return longDate(alert.createdAt);
+  if (dates.length === 1) return longDate(dates[0]);
+  return `${longDate(dates[0])} – ${longDate(dates[dates.length - 1])}`;
+};
+
+/** One paragraph per triggered rule, written from the transactions that rule concerns. */
+const ruleParagraph = (alert: Alert, rule: AMLRule): string => {
+  const suspicious = alert.transactions.filter(t => t.suspicious);
+  const cash = suspicious.filter(t => t.type === 'cash');
+  const wires = suspicious.filter(t => t.type === 'wire');
+
+  const heading = `${rule.name.toUpperCase()} (Rule ${rule.code})`;
+  const lines: string[] = [heading, ''];
+
+  if (rule.code.includes('STR') && cash.length > 0) {
+    const total = cash.reduce((sum, t) => sum + t.amount, 0);
+    const amounts = joinList(cash.map(t => gbp(t.amount)));
+    lines.push(
+      `The Subject made ${cash.length} cash deposit${cash.length === 1 ? '' : 's'} totalling ${gbp(total)}. ` +
+        `Individual deposit amounts were ${amounts} — each falling below the £10,000 Currency Transaction Report (CTR) ` +
+        `threshold. This pattern is inconsistent with the Subject's declared business operations and represents a ` +
+        `marked deviation from historical cash activity.`,
+    );
+  } else if (wires.length > 0) {
+    const total = wires.reduce((sum, t) => sum + t.amount, 0);
+    const destinations = joinList(
+      wires.map(t => `${t.counterparty} (${t.counterpartyBank}, ${t.country})`),
+    );
+    lines.push(
+      `${rule.description}. ${wires.length} wire transfer${wires.length === 1 ? '' : 's'} totalling ${gbp(total)} ` +
+        `${wires.length === 1 ? 'was' : 'were'} identified, involving ${destinations}. No commercial documentation ` +
+        `was provided to substantiate ${wires.length === 1 ? 'this transfer' : 'these transfers'}.`,
+    );
+  } else {
+    lines.push(
+      `${rule.description}. This rule fired on ${longDate(rule.triggeredAt)} at ${rule.severity.toUpperCase()} ` +
+        `severity. Supporting transaction detail is held in case ${alert.caseId}.`,
+    );
+  }
+
+  return lines.join('\n');
+};
+
+const turnoverParagraph = (customer: Customer): string => {
+  const { expectedMonthlyTurnover: expected, actualMonthlyTurnover: actual } = customer;
+  if (expected <= 0) {
+    return (
+      'TURNOVER ANOMALY\n\n' +
+      `The Subject's actual monthly turnover reached approximately ${gbp(actual)}. No expected turnover was ` +
+      'declared at onboarding, preventing variance assessment.'
+    );
+  }
+  const variance = Math.round((actual / expected - 1) * 100);
+  return (
+    'TURNOVER ANOMALY\n\n' +
+    `The Subject's actual monthly turnover during the period reached approximately ${gbp(actual)} — an increase of ` +
+    `${variance}% above the declared expected monthly turnover of ${gbp(expected)}. No satisfactory explanation or ` +
+    'supporting documentation has been provided by the Subject to account for this material discrepancy.'
+  );
+};
+
+const transactionSchedule = (alert: Alert): string => {
+  const suspicious = alert.transactions.filter(t => t.suspicious);
+  if (suspicious.length === 0) {
+    return (
+      'SCHEDULE OF FLAGGED TRANSACTIONS\n\n' +
+      'No individual transactions have been flagged at the time of filing. This report is raised on the basis of ' +
+      'the rule triggers and profile anomalies described above; transaction-level analysis is ongoing.'
+    );
+  }
+  const rows = suspicious.map(
+    t =>
+      `  ${t.date} ${t.time}  ${t.type.toUpperCase().padEnd(6)} ${gbp(t.amount).padStart(12)}  ` +
+      `${t.counterparty} (${t.country})\n      Flag: ${t.flaggedReason ?? 'Flagged by monitoring rule'}`,
+  );
+  const total = suspicious.reduce((sum, t) => sum + t.amount, 0);
+  return [
+    'SCHEDULE OF FLAGGED TRANSACTIONS',
+    '',
+    ...rows,
+    '',
+    `  Total flagged value: ${gbp(total)} across ${suspicious.length} transaction${suspicious.length === 1 ? '' : 's'}.`,
+  ].join('\n');
+};
+
+/**
+ * Builds the SAR narrative for a specific alert. Every section is derived from
+ * that alert's own customer, transactions and triggered rules.
+ */
 export const generateSARNarrative = (alertId: string): string => {
+  const alert = mockAlerts.find(a => a.id === alertId);
+  if (!alert) {
+    throw new Error(`Cannot generate a SAR narrative: no alert found with id "${alertId}".`);
+  }
+
+  const { customer } = alert;
+  const typologies = joinList(alert.typology.map(t => typologyNarrativeLabels[t]));
+  const suspiciousTotal = alert.transactions
+    .filter(t => t.suspicious)
+    .reduce((sum, t) => sum + t.amount, 0);
+
+  const jurisdictions = Array.from(
+    new Set(alert.transactions.filter(t => t.suspicious && t.country !== 'GB').map(t => t.country)),
+  );
+
   return `SUSPICIOUS ACTIVITY REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Report Reference: SAR-2024-00341-GB
+${RULE}
+Report Reference: ${sarReferenceFor(alert)}
+Case Reference:   ${alert.caseId}
 Filing Institution: Barclays Bank PLC
-Date of Report: ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}
-Reporting Period: 01 November 2024 – 14 November 2024
+Date of Report: ${longDate(new Date())}
+Reporting Period: ${reportingPeriod(alert)}
 Classification: RESTRICTED | REGULATORY USE ONLY
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 SECTION 1 — SUBJECT INFORMATION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 
-Subject Name:       Meridian Trading Ltd.
-Account Number:     40-51-62 8821043
-Account Type:       Business Current Account
-KYC Status:         Enhanced Due Diligence (EDD) — Active
-Registration:       Companies House No. 12847651
-Incorporated:       March 2022, England & Wales
-Stated Business:    Import/Export Trading
-Risk Rating:        HIGH (elevated per EDD review, Oct 2024)
+Subject Name:       ${customer.name}
+Account Number:     ${customer.accountNumber}
+Account Type:       ${customer.accountType}
+KYC Status:         ${kycStatusLabels[customer.kycStatus]}
+Customer Since:     ${customer.onboardedDate}
+Nationality:        ${customer.nationality}
+Stated Occupation:  ${customer.occupation}
+Risk Rating:        ${customer.riskRating.toUpperCase()} (alert risk score ${alert.riskScore}/100)
+PEP Status:         ${customer.pep ? 'YES — Politically Exposed Person, enhanced monitoring applies' : 'Not identified as a PEP'}
+Sanctions Screening:${customer.sanctioned ? ' MATCH — subject appears on a sanctions list' : ' No match at time of filing'}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 SECTION 2 — SUSPICIOUS ACTIVITY DESCRIPTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 
-This institution files this Suspicious Activity Report in connection with transactions conducted by Meridian Trading Ltd. (hereinafter "the Subject") between 1 November 2024 and 10 November 2024, which exhibit characteristics consistent with currency structuring and rapid fund movement typologies under the Proceeds of Crime Act 2002 (POCA) and the Money Laundering, Terrorist Financing and Transfer of Funds Regulations 2017.
+This institution files this Suspicious Activity Report in connection with transactions conducted by ${customer.name} (hereinafter "the Subject"), covering ${reportingPeriod(alert)}, which exhibit characteristics consistent with ${typologies} under the Proceeds of Crime Act 2002 (POCA) and the Money Laundering, Terrorist Financing and Transfer of Funds Regulations 2017.
 
-STRUCTURING ACTIVITY (Rule AML-STR-001)
+${alert.triggeredRules.map(rule => ruleParagraph(alert, rule)).join('\n\n')}
 
-Between 1 November and 7 November 2024, the Subject made four (4) cash deposits totalling £38,900 GBP. Individual deposit amounts were £9,800, £9,500, £9,900, and £9,700 respectively — each deliberately structured below the Currency Transaction Report (CTR) threshold of £10,000. This pattern is inconsistent with the Subject's declared business operations and represents a marked deviation from historical cash activity. The deposits were made across two branch locations and one ATM network, suggesting an attempt to avoid detection through geographic dispersal.
+${turnoverParagraph(customer)}
 
-RAPID FUND MOVEMENT (Rule AML-VEL-002)
+${transactionSchedule(alert)}
 
-On 10 November 2024, £87,200 GBP was transferred via SWIFT to Oceanic Financial Services, registered in the Republic of Seychelles (a FATF grey-listed jurisdiction), account held at Seychelles Commercial Bank. This transfer occurred within 72 hours of the accumulated cash deposits, consistent with a "collect and move" typology. The named beneficiary, Oceanic Financial Services, has no prior transactional relationship with the Subject, and no commercial documentation was provided to substantiate the transfer.
-
-HIGH-RISK JURISDICTION WIRE (Rule AML-GEO-003)
-
-On 3 November 2024, a wire transfer of £28,500 GBP was sent to Volkov Enterprises LLC, held at Promsvyazbank in Russia — a jurisdiction subject to enhanced monitoring under current HM Treasury guidance. The stated purpose of "INV-2024-887" could not be verified against any known invoice or contract in the Subject's provided business records.
-
-TURNOVER ANOMALY (Rule AML-TUR-004)
-
-The Subject's actual monthly turnover during the period reached approximately £1,840,000 GBP — representing an increase of 636% above the declared expected monthly turnover of £250,000. No satisfactory explanation or supporting documentation has been provided by the Subject to account for this material discrepancy.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 SECTION 3 — ANALYST ASSESSMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 
-The combination of deliberate structuring, rapid offshore transfer, engagement with FATF grey-listed jurisdictions, and material turnover anomaly collectively raise significant concerns regarding potential money laundering activity. The observed activity is consistent with the three-stage model of money laundering: placement (cash deposits), layering (international wire transfers to obfuscate origin), and potentially integration into the offshore financial system.
+The activity described above collectively raises significant concerns regarding potential money laundering. ${alert.triggeredRules.length} monitoring rule${alert.triggeredRules.length === 1 ? '' : 's'} fired on this account${suspiciousTotal > 0 ? `, with ${gbp(suspiciousTotal)} in flagged transaction value` : ''}.${jurisdictions.length > 0 ? ` Counterparties were identified in the following jurisdictions: ${jurisdictions.join(', ')}.` : ''}
 
-This institution has been unable to obtain a satisfactory explanation from the Subject and considers the activity to be suspicious for the purposes of Section 330 of POCA 2002.
+The observed activity is consistent with the three-stage model of money laundering: placement, layering and potential integration. This institution has been unable to obtain a satisfactory explanation from the Subject and considers the activity to be suspicious for the purposes of Section 330 of POCA 2002.
 
 Accordingly, this SAR is filed with the National Crime Agency (NCA) Financial Intelligence Unit.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 SECTION 4 — LAW ENFORCEMENT CONTACTS & NEXT STEPS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 
 Filing Institution Contact: AML Compliance Unit, Barclays Bank PLC
 Submission Channel:         UKFIU SARs Online (ELMER)
 Priority Designation:       DAML (Defence Against Money Laundering) — Consent Requested
-Account Status:             FROZEN pending NCA consent determination
+Account Status:             ${alert.status === 'escalated' ? 'FROZEN pending NCA consent determination' : 'Under enhanced monitoring'}
+Assigned Analyst:           ${alert.assignedTo ?? 'Unassigned'}
 Retention Period:           5 years from filing date per POCA 2002 s.340
 
 This report is protected under the POCA 2002 "tipping off" provisions (s.333A). Disclosure of this report or its contents to any person connected to the suspicious activity is strictly prohibited.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${RULE}
 END OF REPORT — AI GENERATED DRAFT — PENDING ANALYST REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+${RULE}`;
 };
 
-export const initialSARDraft: SARDraft = {
-  id: 'SAR-2024-00341-GB',
-  alertId: 'ALT-2024-00341',
-  status: 'draft',
-  currentVersion: 1,
-  versions: [],
-  analystComments: '',
+/** Builds an empty draft shell for a specific alert, with its own filing reference. */
+export const createSARDraft = (alertId: string): Omit<SARDraft, 'versions' | 'currentVersion'> => {
+  const alert = mockAlerts.find(a => a.id === alertId);
+  if (!alert) {
+    throw new Error(`Cannot create a SAR draft: no alert found with id "${alertId}".`);
+  }
+  return {
+    id: sarReferenceFor(alert),
+    alertId,
+    status: 'draft',
+    analystComments: '',
+  };
 };

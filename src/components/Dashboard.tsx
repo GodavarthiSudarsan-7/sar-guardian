@@ -1,5 +1,5 @@
-import React from 'react';
-import { useApp } from '@/context/AppContext';
+import React, { useMemo } from 'react';
+import { useApp } from '@/context/useApp';
 import { Alert } from '@/types';
 import {
   RiskBadge,
@@ -8,7 +8,9 @@ import {
   StatusBadge,
   SectionHeader,
   KVRow,
+  KycStatus,
 } from '@/components/shared/UIComponents';
+import { turnoverVariance } from '@/lib/customer';
 import { AlertTriangle, Users, FileText, TrendingUp, ChevronRight, Building2 } from 'lucide-react';
 
 const MetricCard: React.FC<{
@@ -74,7 +76,15 @@ const Dashboard: React.FC = () => {
 
   const criticalCount = alerts.filter(a => a.riskLevel === 'critical').length;
   const escalatedCount = alerts.filter(a => a.status === 'escalated').length;
-  const topAlert = alerts[0];
+  const flaggedCustomers = new Set(alerts.map(a => a.customerId)).size;
+
+  // The queue claims to be sorted by risk score, so actually sort it rather
+  // than relying on the order the alerts happen to arrive in.
+  const sortedAlerts = useMemo(
+    () => [...alerts].sort((a, b) => b.riskScore - a.riskScore),
+    [alerts],
+  );
+  const topAlert = sortedAlerts[0];
 
   return (
     <div className="flex flex-col gap-4">
@@ -103,7 +113,7 @@ const Dashboard: React.FC = () => {
         />
         <MetricCard
           label="Customers Flagged"
-          value={alerts.length}
+          value={flaggedCustomers}
           icon={<Users className="w-4 h-4" />}
           sub="EDD active"
           color="text-success"
@@ -129,19 +139,28 @@ const Dashboard: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {alerts.map(alert => (
-                  <AlertRow
-                    key={alert.id}
-                    alert={alert}
-                    onClick={() => selectAlert(alert.id)}
-                  />
-                ))}
+                {sortedAlerts.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-xs text-muted-foreground">
+                      No active alerts in the queue.
+                    </td>
+                  </tr>
+                ) : (
+                  sortedAlerts.map(alert => (
+                    <AlertRow
+                      key={alert.id}
+                      alert={alert}
+                      onClick={() => selectAlert(alert.id)}
+                    />
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         </div>
 
-        {/* KYC Summary Panel */}
+        {/* KYC Summary Panel — only rendered when there is an alert to summarise */}
+        {topAlert && (
         <div className="flex flex-col gap-3">
           <div className="panel">
             <SectionHeader
@@ -158,9 +177,7 @@ const Dashboard: React.FC = () => {
                 </div>
               </div>
               <div className="space-y-0">
-                <KVRow label="KYC Status" value={
-                  <span className="text-warning text-xs font-mono">EDD Active</span>
-                } />
+                <KVRow label="KYC Status" value={<KycStatus status={topAlert.customer.kycStatus} />} />
                 <KVRow label="Account Type" value={topAlert.customer.accountType} />
                 <KVRow label="Nationality" value={topAlert.customer.nationality} />
                 <KVRow label="PEP" value={topAlert.customer.pep ? <span className="text-destructive">YES</span> : 'No'} />
@@ -175,11 +192,24 @@ const Dashboard: React.FC = () => {
                   value={<span className="text-destructive">£{topAlert.customer.actualMonthlyTurnover.toLocaleString()}/mo</span>}
                   mono
                 />
-                <KVRow label="Variance" value={
-                  <span className="text-destructive font-semibold">
-                    +{Math.round((topAlert.customer.actualMonthlyTurnover / topAlert.customer.expectedMonthlyTurnover - 1) * 100)}%
-                  </span>
-                } />
+                {(() => {
+                  const variance = turnoverVariance(topAlert.customer);
+                  return (
+                    <KVRow
+                      label="Variance"
+                      value={
+                        variance === null ? (
+                          <span className="text-muted-foreground">Not declared</span>
+                        ) : (
+                          <span className={variance > 0 ? 'text-destructive font-semibold' : 'text-success font-semibold'}>
+                            {variance > 0 ? '+' : ''}
+                            {variance}%
+                          </span>
+                        )
+                      }
+                    />
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -203,6 +233,7 @@ const Dashboard: React.FC = () => {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

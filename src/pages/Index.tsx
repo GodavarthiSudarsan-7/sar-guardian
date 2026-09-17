@@ -1,5 +1,6 @@
 import React from 'react';
-import { AppProvider, useApp } from '@/context/AppContext';
+import { AppProvider } from '@/context/AppContext';
+import { useApp } from '@/context/useApp';
 import RoleSelector from '@/components/RoleSelector';
 import Dashboard from '@/components/Dashboard';
 import CaseView from '@/components/CaseView';
@@ -9,7 +10,7 @@ import { Shield, LayoutDashboard, FileText, ClipboardList, Eye } from 'lucide-re
 import { cn } from '@/lib/utils';
 
 const AppShell: React.FC = () => {
-  const { view, role, selectedAlertId, setView, selectAlert } = useApp();
+  const { view, role, selectedAlertId, sarDraft, setView, selectAlert } = useApp();
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -54,7 +55,7 @@ const AppShell: React.FC = () => {
               Case
             </button>
           )}
-          {view === 'sar' && (
+          {sarDraft && (
             <button
               onClick={() => setView('sar')}
               className={cn(

@@ -1,6 +1,25 @@
 import React from 'react';
-import { RiskLevel, Typology, AlertStatus } from '@/types';
+import { RiskLevel, Typology, AlertStatus, Customer } from '@/types';
 import { cn } from '@/lib/utils';
+
+const kycStatusLabels: Record<Customer['kycStatus'], string> = {
+  verified: 'Verified',
+  enhanced_due_diligence: 'EDD Active',
+  pending: 'Pending',
+  failed: 'Failed',
+};
+
+const kycStatusColors: Record<Customer['kycStatus'], string> = {
+  verified: 'text-success',
+  enhanced_due_diligence: 'text-warning',
+  pending: 'text-muted-foreground',
+  failed: 'text-destructive',
+};
+
+/** Renders the customer's real KYC status; both views used to hardcode "EDD Active". */
+export const KycStatus: React.FC<{ status: Customer['kycStatus'] }> = ({ status }) => (
+  <span className={cn('text-xs font-mono', kycStatusColors[status])}>{kycStatusLabels[status]}</span>
+);
 
 const typologyLabels: Record<Typology, string> = {
   structuring: 'Structuring',

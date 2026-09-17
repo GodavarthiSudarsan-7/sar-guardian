@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { useApp } from '@/context/AppContext';
+import { useApp } from '@/context/useApp';
 import { SectionHeader } from '@/components/shared/UIComponents';
 import AuditTrail from '@/components/AuditTrail';
 import {
@@ -8,7 +8,6 @@ import {
   XCircle,
   Edit3,
   Save,
-  Clock,
   ChevronDown,
   ChevronUp,
   AlertTriangle,

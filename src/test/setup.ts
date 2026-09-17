@@ -1,4 +1,6 @@
-import "@testing-library/jest-dom";
+// The /vitest entrypoint both registers the matchers and augments Vitest's
+// Assertion types, so `toBeInTheDocument` typechecks under strict mode.
+import "@testing-library/jest-dom/vitest";
 
 Object.defineProperty(window, "matchMedia", {
   writable: true,
